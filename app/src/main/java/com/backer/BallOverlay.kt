@@ -320,10 +320,10 @@ class BallOverlay(
 
     companion object {
         private const val BALL_SIZE_DP = 52f
-        private const val TAP_SLOP_DP = 12f
+        private const val TAP_SLOP_DP = 16f
         private const val SWIPE_SLOP_DP = 16f
         private const val TAP_MS = 200L
-        private const val TAP_SETTLE_MS = 180L
+        private const val TAP_SETTLE_MS = 200L
         private const val HOLD_MS = 250L
     }
 }
