@@ -4,12 +4,12 @@ import android.accessibilityservice.AccessibilityService
 import android.content.Context
 import android.graphics.PixelFormat
 import android.os.Build
+import android.os.Handler
+import android.os.Looper
 import android.util.DisplayMetrics
 import android.view.Gravity
 import android.view.MotionEvent
-import android.view.VelocityTracker
 import android.view.View
-import android.view.ViewConfiguration
 import android.view.WindowManager
 import android.view.WindowMetrics
 import androidx.compose.foundation.Canvas
@@ -37,10 +37,10 @@ import kotlin.math.hypot
 /**
  * Overlay pointer state machine.
  *
- * A single tap is Back. A tap-and-hold consumes the gesture and does nothing.
- * Move mode starts only after a second down within [DOUBLE_TAP_MS] of the first up,
- * then a hold of [HOLD_MS]. A single drag never moves the ball.
- * Swipes lock to the dominant axis once travel exceeds [swipeSlopPx].
+ * A single tap fires Back after [TAP_SETTLE_MS] so a second tap can cancel it.
+ * Holding one tap past [HOLD_MS] enters move mode. Drag moves the ball.
+ * Release saves the position. A double tap fires nothing.
+ * A swipe fires at once when travel exceeds [swipeSlopPx]. Lift then ends it.
  */
 class BallOverlay(
     private val service: BackerAccessibilityService
@@ -50,8 +50,6 @@ class BallOverlay(
     private val ballSizePx = (BALL_SIZE_DP * density).toInt()
     private val tapSlopPx = TAP_SLOP_DP * density
     private val swipeSlopPx = SWIPE_SLOP_DP * density
-    private val minFlingVelocity = ViewConfiguration.get(service).scaledMinimumFlingVelocity.toFloat()
-    private var velocityTracker: VelocityTracker? = null
 
     private val params = WindowManager.LayoutParams(
         ballSizePx,
@@ -66,22 +64,25 @@ class BallOverlay(
     }
 
     private val owner = OverlayLifecycleOwner()
+    private val handler = Handler(Looper.getMainLooper())
     private var view: View? = null
     private var attached = false
 
-    private var downX = 0f
-    private var downY = 0f
     private var downRawX = 0f
     private var downRawY = 0f
     private var downTime = 0L
-    private var lastUpTime = 0L
-    private var lastUpX = 0f
-    private var lastUpY = 0f
-    private var armedForMove = false
+    private var tapCount = 0
+    private var tapPending = false
     private var moving = false
     private var swiping = false
     private var swipeAxis = Axis.NONE
+    private var swipeFired = false
     private var holdConsumed = false
+    private val pendingTap = Runnable {
+        tapPending = false
+        tapCount = 0
+        service.performSystemAction(AccessibilityService.GLOBAL_ACTION_BACK)
+    }
     private var dragOriginX = 0
     private var dragOriginY = 0
 
@@ -103,6 +104,7 @@ class BallOverlay(
     }
 
     fun detach() {
+        handler.removeCallbacks(pendingTap)
         val current = view ?: return
         current.setOnTouchListener(null)
         if (attached) {
@@ -130,32 +132,28 @@ class BallOverlay(
     }
 
     private fun onDown(event: MotionEvent) {
-        downX = event.x
-        downY = event.y
         downRawX = event.rawX
         downRawY = event.rawY
         downTime = event.eventTime
         moving = false
         swiping = false
         swipeAxis = Axis.NONE
+        swipeFired = false
         holdConsumed = false
-        velocityTracker?.recycle()
-        velocityTracker = VelocityTracker.obtain().also { it.addMovement(event) }
-        val gap = event.eventTime - lastUpTime
-        val nearLast = hypot(event.rawX - lastUpX, event.rawY - lastUpY) <= tapSlopPx
-        armedForMove = gap in 1..DOUBLE_TAP_MS && nearLast
         dragOriginX = params.x
         dragOriginY = params.y
     }
 
     private fun onMove(event: MotionEvent) {
-        velocityTracker?.addMovement(event)
         val dx = event.rawX - downRawX
         val dy = event.rawY - downRawY
         val travel = hypot(dx, dy)
         val held = event.eventTime - downTime
 
-        if (armedForMove && !moving && !swiping && held >= HOLD_MS) {
+        if (!moving && !swiping && held >= HOLD_MS) {
+            handler.removeCallbacks(pendingTap)
+            tapPending = false
+            tapCount = 0
             moving = true
         }
         if (moving) {
@@ -166,19 +164,22 @@ class BallOverlay(
             return
         }
         if (travel >= swipeSlopPx) {
+            handler.removeCallbacks(pendingTap)
+            tapPending = false
+            tapCount = 0
             swiping = true
-            armedForMove = false
+            swipeFired = true
             swipeAxis = if (abs(dx) >= abs(dy)) Axis.HORIZONTAL else Axis.VERTICAL
+            dispatchSwipe(dx, dy)
             return
         }
         // A press that stays put past the hold window is not a tap and not a move.
-        if (!armedForMove && held >= HOLD_MS) {
+        if (held >= HOLD_MS) {
             holdConsumed = true
         }
     }
 
     private fun onUp(event: MotionEvent) {
-        velocityTracker?.addMovement(event)
         val dx = event.rawX - downRawX
         val dy = event.rawY - downRawY
         val travel = hypot(dx, dy)
@@ -187,51 +188,37 @@ class BallOverlay(
         if (moving) {
             updatePosition(dragOriginX + dx.toInt(), dragOriginY + dy.toInt())
             savePosition()
-            clearTapMemory()
+            tapCount = 0
             moving = false
-            armedForMove = false
-            releaseVelocityTracker()
             return
         }
         if (swiping) {
-            if (hasSwipeVelocity()) {
-                dispatchSwipe(dx, dy)
-            }
-            clearTapMemory()
+            tapCount = 0
             swiping = false
-            releaseVelocityTracker()
+            swipeFired = false
             return
         }
         if (holdConsumed || held >= HOLD_MS) {
-            clearTapMemory()
+            tapCount = 0
             holdConsumed = false
-            armedForMove = false
-            releaseVelocityTracker()
             return
         }
         if (travel <= tapSlopPx && held <= TAP_MS) {
-            lastUpTime = event.eventTime
-            lastUpX = event.rawX
-            lastUpY = event.rawY
-            armedForMove = false
-            service.performSystemAction(AccessibilityService.GLOBAL_ACTION_BACK)
-            releaseVelocityTracker()
+            tapCount += 1
+            if (tapCount >= 2) {
+                handler.removeCallbacks(pendingTap)
+                tapPending = false
+                tapCount = 0
+                return
+            }
+            tapPending = true
+            handler.removeCallbacks(pendingTap)
+            handler.postDelayed(pendingTap, TAP_SETTLE_MS)
             return
         }
-        clearTapMemory()
-        releaseVelocityTracker()
-    }
-
-    private fun hasSwipeVelocity(): Boolean {
-        val tracker = velocityTracker ?: return false
-        tracker.computeCurrentVelocity(1000)
-        val speed = hypot(tracker.xVelocity, tracker.yVelocity)
-        return speed >= minFlingVelocity
-    }
-
-    private fun releaseVelocityTracker() {
-        velocityTracker?.recycle()
-        velocityTracker = null
+        handler.removeCallbacks(pendingTap)
+        tapPending = false
+        tapCount = 0
     }
 
     private fun dispatchSwipe(dx: Float, dy: Float) {
@@ -252,20 +239,17 @@ class BallOverlay(
     }
 
     private fun cancelGesture() {
+        handler.removeCallbacks(pendingTap)
+        tapPending = false
+        tapCount = 0
         if (moving) {
             savePosition()
         }
         moving = false
         swiping = false
-        armedForMove = false
+        swipeFired = false
         holdConsumed = false
         swipeAxis = Axis.NONE
-        clearTapMemory()
-        releaseVelocityTracker()
-    }
-
-    private fun clearTapMemory() {
-        lastUpTime = 0L
     }
 
     private fun updatePosition(x: Int, y: Int) {
@@ -327,9 +311,9 @@ class BallOverlay(
     companion object {
         private const val BALL_SIZE_DP = 56f
         private const val TAP_SLOP_DP = 12f
-        private const val SWIPE_SLOP_DP = 48f
+        private const val SWIPE_SLOP_DP = 16f
         private const val TAP_MS = 200L
-        private const val DOUBLE_TAP_MS = 300L
+        private const val TAP_SETTLE_MS = 180L
         private const val HOLD_MS = 250L
     }
 }
