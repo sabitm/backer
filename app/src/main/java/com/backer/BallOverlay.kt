@@ -65,6 +65,7 @@ class BallOverlay(
 
     private val owner = OverlayLifecycleOwner()
     private val handler = Handler(Looper.getMainLooper())
+    private val pressed = androidx.compose.runtime.mutableStateOf(false)
     private var view: View? = null
     private var attached = false
 
@@ -93,7 +94,7 @@ class BallOverlay(
             setViewCompositionStrategy(ViewCompositionStrategy.DisposeOnDetachedFromWindow)
             setViewTreeLifecycleOwner(owner)
             setViewTreeSavedStateRegistryOwner(owner)
-            setContent { BallFace() }
+            setContent { BallFace(pressed.value) }
             setOnTouchListener { _, event -> handleTouch(event) }
             contentDescription = service.getString(R.string.ball_content_description)
         }
@@ -105,6 +106,7 @@ class BallOverlay(
 
     fun detach() {
         handler.removeCallbacks(pendingTap)
+        pressed.value = false
         val current = view ?: return
         current.setOnTouchListener(null)
         if (attached) {
@@ -132,6 +134,7 @@ class BallOverlay(
     }
 
     private fun onDown(event: MotionEvent) {
+        pressed.value = true
         downRawX = event.rawX
         downRawY = event.rawY
         downTime = event.eventTime
@@ -188,22 +191,26 @@ class BallOverlay(
         if (moving) {
             updatePosition(dragOriginX + dx.toInt(), dragOriginY + dy.toInt())
             savePosition()
+            pressed.value = false
             tapCount = 0
             moving = false
             return
         }
         if (swiping) {
+            pressed.value = false
             tapCount = 0
             swiping = false
             swipeFired = false
             return
         }
         if (holdConsumed || held >= HOLD_MS) {
+            pressed.value = false
             tapCount = 0
             holdConsumed = false
             return
         }
         if (travel <= tapSlopPx && held <= TAP_MS) {
+            pressed.value = false
             tapCount += 1
             if (tapCount >= 2) {
                 handler.removeCallbacks(pendingTap)
@@ -217,11 +224,13 @@ class BallOverlay(
             return
         }
         handler.removeCallbacks(pendingTap)
+        pressed.value = false
         tapPending = false
         tapCount = 0
     }
 
     private fun dispatchSwipe(dx: Float, dy: Float) {
+        pressed.value = false
         val action = when (swipeAxis) {
             Axis.HORIZONTAL -> if (dx < 0f) {
                 AccessibilityService.GLOBAL_ACTION_HOME
@@ -240,6 +249,7 @@ class BallOverlay(
 
     private fun cancelGesture() {
         handler.removeCallbacks(pendingTap)
+        pressed.value = false
         tapPending = false
         tapCount = 0
         if (moving) {
@@ -309,7 +319,7 @@ class BallOverlay(
     }
 
     companion object {
-        private const val BALL_SIZE_DP = 56f
+        private const val BALL_SIZE_DP = 52f
         private const val TAP_SLOP_DP = 12f
         private const val SWIPE_SLOP_DP = 16f
         private const val TAP_MS = 200L
@@ -319,11 +329,15 @@ class BallOverlay(
 }
 
 @Composable
-private fun BallFace() {
-    Canvas(modifier = Modifier.size(56.dp)) {
+private fun BallFace(flash: Boolean) {
+    Canvas(modifier = Modifier.size(52.dp)) {
         val radius = size.minDimension / 2f
         drawCircle(
-            color = Color(0xFF1C1B1F).copy(alpha = 0.85f),
+            color = if (flash) {
+                Color.White
+            } else {
+                Color(0xFF1C1B1F).copy(alpha = 0.45f)
+            },
             radius = radius,
             center = Offset(size.width / 2f, size.height / 2f)
         )
@@ -334,7 +348,7 @@ private fun BallFace() {
         }
         drawPath(
             path = chevron,
-            color = Color.White,
+            color = if (flash) Color(0xFF1C1B1F).copy(alpha = 0.70f) else Color.White.copy(alpha = 0.70f),
             style = Stroke(width = size.minDimension * 0.07f)
         )
     }
