@@ -4,4 +4,5 @@
     <string name="accessibility_service_summary">Floating back button and gesture ball</string>
     <string name="accessibility_service_description">Backer shows a floating ball that sends Back, Home, Recents, Notifications, and Lock Screen. Enable this service so the ball can run without a notification. Backer does not read screen content.</string>
     <string name="ball_content_description">Backer floating ball</string>
+    <string name="cursor_content_description">Backer mouse cursor</string>
 </resources>

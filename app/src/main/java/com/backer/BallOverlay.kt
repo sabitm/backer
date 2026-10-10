@@ -39,8 +39,11 @@ import kotlin.math.hypot
  *
  * A single tap fires Back after [TAP_SETTLE_MS] so a second tap can cancel it.
  * Holding one tap past [HOLD_MS] enters move mode. Drag moves the ball.
- * Release saves the position. A double tap fires nothing.
+ * Release saves the position. A double tap toggles mouse mode.
  * A swipe fires at once when travel exceeds [swipeSlopPx]. Lift then ends it.
+ *
+ * In mouse mode the ball stays put. Drag moves the cursor at [CURSOR_SPEED].
+ * A single tap clicks at the cursor. A swipe scrolls at the cursor. A second double tap exits.
  */
 class BallOverlay(
     private val service: BackerAccessibilityService
@@ -50,6 +53,10 @@ class BallOverlay(
     private val ballSizePx = (BALL_SIZE_DP * density).toInt()
     private val tapSlopPx = TAP_SLOP_DP * density
     private val swipeSlopPx = SWIPE_SLOP_DP * density
+    private val scrollPx = SCROLL_DP * density
+    private val mouseDriveSlopPx = MOUSE_DRIVE_SLOP_DP * density
+    private val driveCapPx = DRIVE_CAP_DP * density
+    private val cursor = MouseCursor(service)
 
     private val params = WindowManager.LayoutParams(
         ballSizePx,
@@ -79,10 +86,26 @@ class BallOverlay(
     private var swipeAxis = Axis.NONE
     private var swipeFired = false
     private var holdConsumed = false
+    private var mouseMode = false
+    private var mouseDriving = false
+    private var cursorDragX = 0f
+    private var cursorDragY = 0f
+    private var lastDriveTime = 0L
     private val pendingTap = Runnable {
         tapPending = false
         tapCount = 0
-        service.performSystemAction(AccessibilityService.GLOBAL_ACTION_BACK)
+        if (mouseMode) {
+            tapThroughCursor { x, y -> service.clickAt(x, y) }
+        } else {
+            service.performSystemAction(AccessibilityService.GLOBAL_ACTION_BACK)
+        }
+    }
+    // The cursor overlay counts as an obscuring window, so the system drops taps
+    // through it. Dim it to alpha 0 for the dispatch window, then restore it.
+    private val restoreCursor = Runnable {
+        if (mouseMode) {
+            cursor.setDim(false)
+        }
     }
     private var dragOriginX = 0
     private var dragOriginY = 0
@@ -106,7 +129,9 @@ class BallOverlay(
 
     fun detach() {
         handler.removeCallbacks(pendingTap)
+        handler.removeCallbacks(restoreCursor)
         pressed.value = false
+        exitMouseMode()
         val current = view ?: return
         current.setOnTouchListener(null)
         if (attached) {
@@ -135,6 +160,12 @@ class BallOverlay(
 
     private fun onDown(event: MotionEvent) {
         pressed.value = true
+        // Every new touch starts with a visible cursor. A prior dispatch may have
+        // left it dimmed with a restore still queued.
+        handler.removeCallbacks(restoreCursor)
+        if (mouseMode) {
+            cursor.setDim(false)
+        }
         downRawX = event.rawX
         downRawY = event.rawY
         downTime = event.eventTime
@@ -143,6 +174,7 @@ class BallOverlay(
         swipeAxis = Axis.NONE
         swipeFired = false
         holdConsumed = false
+        mouseDriving = false
         dragOriginX = params.x
         dragOriginY = params.y
     }
@@ -153,7 +185,38 @@ class BallOverlay(
         val travel = hypot(dx, dy)
         val held = event.eventTime - downTime
 
-        if (!moving && !swiping && held >= HOLD_MS) {
+        // Mouse drive is continuous. Hold past HOLD_MS or push past the drive gate,
+        // then every move shifts the cursor. No scroll branch. Release ends it.
+        if (mouseMode && !mouseDriving && (held >= HOLD_MS || travel >= mouseDriveSlopPx)) {
+            handler.removeCallbacks(pendingTap)
+            tapPending = false
+            tapCount = 0
+            mouseDriving = true
+            cursorDragX = cursor.x
+            cursorDragY = cursor.y
+            lastDriveTime = event.eventTime
+        }
+        if (mouseMode && mouseDriving) {
+            // Touchpad-style gain. Slow moves stay 1x for precision.
+            // Fast flings scale up to 4x to cross the screen in one stroke.
+            val dt = (event.eventTime - lastDriveTime).coerceAtLeast(1L) / 1000f
+            val speed = hypot(dx, dy) / dt
+            val gain = when {
+                speed <= DRIVE_SLOW_PX_S -> 1f
+                speed >= DRIVE_FAST_PX_S -> DRIVE_MAX_GAIN
+                else -> 1f + (speed - DRIVE_SLOW_PX_S) / (DRIVE_FAST_PX_S - DRIVE_SLOW_PX_S) * (DRIVE_MAX_GAIN - 1f)
+            }
+            lastDriveTime = event.eventTime
+            val stepX = (dx * gain).coerceIn(-driveCapPx, driveCapPx)
+            val stepY = (dy * gain).coerceIn(-driveCapPx, driveCapPx)
+            cursorDragX += stepX
+            cursorDragY += stepY
+            cursor.moveTo(cursorDragX, cursorDragY)
+            downRawX = event.rawX
+            downRawY = event.rawY
+            return
+        }
+        if (!mouseMode && !moving && !swiping && held >= HOLD_MS) {
             handler.removeCallbacks(pendingTap)
             tapPending = false
             tapCount = 0
@@ -177,7 +240,7 @@ class BallOverlay(
             return
         }
         // A press that stays put past the hold window is not a tap and not a move.
-        if (held >= HOLD_MS) {
+        if (!mouseMode && held >= HOLD_MS) {
             holdConsumed = true
         }
     }
@@ -196,6 +259,13 @@ class BallOverlay(
             moving = false
             return
         }
+        // A mouse drive ends on release with no action. The cursor stays where it stopped.
+        if (mouseMode && mouseDriving) {
+            pressed.value = false
+            tapCount = 0
+            mouseDriving = false
+            return
+        }
         if (swiping) {
             pressed.value = false
             tapCount = 0
@@ -203,7 +273,7 @@ class BallOverlay(
             swipeFired = false
             return
         }
-        if (holdConsumed || held >= HOLD_MS) {
+        if (!mouseMode && (holdConsumed || held >= HOLD_MS)) {
             pressed.value = false
             tapCount = 0
             holdConsumed = false
@@ -216,6 +286,11 @@ class BallOverlay(
                 handler.removeCallbacks(pendingTap)
                 tapPending = false
                 tapCount = 0
+                if (mouseMode) {
+                    exitMouseMode()
+                } else {
+                    enterMouseMode()
+                }
                 return
             }
             tapPending = true
@@ -231,6 +306,8 @@ class BallOverlay(
 
     private fun dispatchSwipe(dx: Float, dy: Float) {
         pressed.value = false
+        // Mouse mode has no swipe action. Swipes are consumed by cursor drive on move.
+        if (mouseMode) return
         val action = when (swipeAxis) {
             Axis.HORIZONTAL -> if (dx < 0f) {
                 AccessibilityService.GLOBAL_ACTION_HOME
@@ -247,8 +324,24 @@ class BallOverlay(
         service.performSystemAction(action)
     }
 
+    private fun tapThroughCursor(dispatch: (Float, Float) -> Unit) {
+        val x = cursor.centerX
+        val y = cursor.centerY
+        cursor.setDim(true)
+        handler.postDelayed({
+            dispatch(x, y)
+            handler.removeCallbacks(restoreCursor)
+            handler.postDelayed(restoreCursor, CURSOR_RESTORE_MS)
+        }, CURSOR_HIDE_MS)
+    }
+
     private fun cancelGesture() {
         handler.removeCallbacks(pendingTap)
+        handler.removeCallbacks(restoreCursor)
+        if (mouseMode) {
+            cursor.setDim(false)
+        }
+        mouseDriving = false
         pressed.value = false
         tapPending = false
         tapCount = 0
@@ -260,6 +353,20 @@ class BallOverlay(
         swipeFired = false
         holdConsumed = false
         swipeAxis = Axis.NONE
+    }
+
+    private fun enterMouseMode() {
+        mouseMode = true
+        cursor.showAt(cursor.x, cursor.y)
+        cursorDragX = cursor.x
+        cursorDragY = cursor.y
+    }
+
+    private fun exitMouseMode() {
+        mouseMode = false
+        handler.removeCallbacks(restoreCursor)
+        cursor.setDim(false)
+        cursor.hide()
     }
 
     private fun updatePosition(x: Int, y: Int) {
@@ -325,6 +432,15 @@ class BallOverlay(
         private const val TAP_MS = 200L
         private const val TAP_SETTLE_MS = 200L
         private const val HOLD_MS = 250L
+        private const val CURSOR_SPEED = 1.5f
+        private const val DRIVE_SLOW_PX_S = 800f
+        private const val DRIVE_FAST_PX_S = 4000f
+        private const val DRIVE_MAX_GAIN = 4f
+        private const val DRIVE_CAP_DP = 96f
+        private const val SCROLL_DP = 200f
+        private const val CURSOR_HIDE_MS = 50L
+        private const val CURSOR_RESTORE_MS = 300L
+        private const val MOUSE_DRIVE_SLOP_DP = 8f
     }
 }
 
@@ -358,7 +474,7 @@ private fun BallFace(flash: Boolean) {
  * ComposeView in a window overlay has no Activity. It still requires a lifecycle owner
  * and a saved-state owner before setContent.
  */
-private class OverlayLifecycleOwner : LifecycleOwner, SavedStateRegistryOwner {
+internal class OverlayLifecycleOwner : LifecycleOwner, SavedStateRegistryOwner {
     private val registry = LifecycleRegistry(this)
     private val savedStateController = SavedStateRegistryController.create(this)
 
