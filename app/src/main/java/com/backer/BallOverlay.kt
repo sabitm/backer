@@ -195,16 +195,21 @@ class BallOverlay(
             cursorDragX = cursor.x
             cursorDragY = cursor.y
             lastDriveTime = event.eventTime
+            // Drop the entry sample. Its delta holds the full gate travel and
+            // would throw the cursor on swipe entry. Next sample starts clean.
+            downRawX = event.rawX
+            downRawY = event.rawY
+            return
         }
         if (mouseMode && mouseDriving) {
-            // Touchpad-style gain. Slow moves stay 1x for precision.
-            // Fast flings scale up to 4x to cross the screen in one stroke.
+            // Touchpad-style gain. Slow moves stay DRIVE_BASE_GAIN for control.
+            // Fast flings scale up to DRIVE_MAX_GAIN to cross the screen in one stroke.
             val dt = (event.eventTime - lastDriveTime).coerceAtLeast(1L) / 1000f
             val speed = hypot(dx, dy) / dt
             val gain = when {
-                speed <= DRIVE_SLOW_PX_S -> 1f
+                speed <= DRIVE_SLOW_PX_S -> DRIVE_BASE_GAIN
                 speed >= DRIVE_FAST_PX_S -> DRIVE_MAX_GAIN
-                else -> 1f + (speed - DRIVE_SLOW_PX_S) / (DRIVE_FAST_PX_S - DRIVE_SLOW_PX_S) * (DRIVE_MAX_GAIN - 1f)
+                else -> DRIVE_BASE_GAIN + (speed - DRIVE_SLOW_PX_S) / (DRIVE_FAST_PX_S - DRIVE_SLOW_PX_S) * (DRIVE_MAX_GAIN - DRIVE_BASE_GAIN)
             }
             lastDriveTime = event.eventTime
             val stepX = (dx * gain).coerceIn(-driveCapPx, driveCapPx)
@@ -433,6 +438,7 @@ class BallOverlay(
         private const val TAP_SETTLE_MS = 200L
         private const val HOLD_MS = 250L
         private const val CURSOR_SPEED = 1.5f
+        private const val DRIVE_BASE_GAIN = 1.5f
         private const val DRIVE_SLOW_PX_S = 800f
         private const val DRIVE_FAST_PX_S = 4000f
         private const val DRIVE_MAX_GAIN = 4f
