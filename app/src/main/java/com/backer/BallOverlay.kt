@@ -214,8 +214,8 @@ class BallOverlay(
             lastDriveTime = event.eventTime
             val stepX = (dx * gain).coerceIn(-driveCapPx, driveCapPx)
             val stepY = (dy * gain).coerceIn(-driveCapPx, driveCapPx)
-            cursorDragX += stepX
-            cursorDragY += stepY
+            cursorDragX = cursor.clampX(cursorDragX + stepX)
+            cursorDragY = cursor.clampY(cursorDragY + stepY)
             cursor.moveTo(cursorDragX, cursorDragY)
             downRawX = event.rawX
             downRawY = event.rawY

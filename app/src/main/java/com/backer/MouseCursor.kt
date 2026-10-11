@@ -100,6 +100,18 @@ class MouseCursor(
         pushLayout()
     }
 
+    // Clamp a raw drag value to the screen so the stored position never winds up
+    // past the edge. Without this, reversing at the edge needs dead travel first.
+    fun clampX(v: Float): Float {
+        val bounds = screenBounds()
+        return v.coerceIn(0f, (bounds.first - sizePx).coerceAtLeast(0).toFloat())
+    }
+
+    fun clampY(v: Float): Float {
+        val bounds = screenBounds()
+        return v.coerceIn(0f, (bounds.second - sizePx).coerceAtLeast(0).toFloat())
+    }
+
     // Dim to alpha 0 instead of removing the view. No rebuild, no flicker.
     // A fully transparent window adds no obscuring opacity, so taps pass through.
     fun setDim(hidden: Boolean) {
