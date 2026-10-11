@@ -60,22 +60,44 @@ class BackerAccessibilityService : AccessibilityService() {
         return performGlobalAction(action)
     }
 
-    fun clickAt(x: Float, y: Float) {
-        try {
+    fun clickAt(x: Float, y: Float, clickId: Long, onFinished: () -> Unit) {
+        var finished = false
+        fun finish(result: String, error: Exception? = null) {
+            if (finished) return
+            finished = true
+            if (result == "completed") {
+                Log.d(TAG, "click $clickId completed")
+            } else {
+                Log.w(TAG, "click $clickId $result", error)
+            }
+            onFinished()
+        }
+
+        val callback = object : GestureResultCallback() {
+            override fun onCompleted(gestureDescription: GestureDescription?) {
+                finish("completed")
+            }
+
+            override fun onCancelled(gestureDescription: GestureDescription?) {
+                finish("cancelled by system")
+            }
+        }
+        val accepted = try {
             val cx = x.coerceAtLeast(0f)
             val cy = y.coerceAtLeast(0f)
-            Log.d(TAG, "click at $cx,$cy")
-            // A zero-length path has empty bounds and throws. Use a 4px path.
+            Log.d(TAG, "click $clickId dispatch at $cx,$cy")
             val path = Path().apply {
                 moveTo(cx, cy)
                 lineTo(cx + 4f, cy + 4f)
             }
             val stroke = GestureDescription.StrokeDescription(path, 0L, CLICK_DURATION_MS)
-            if (!dispatchGesture(GestureDescription.Builder().addStroke(stroke).build(), gestureCallback, gestureHandler)) {
-                Log.w(TAG, "click rejected by system")
-            }
+            dispatchGesture(GestureDescription.Builder().addStroke(stroke).build(), callback, gestureHandler)
         } catch (e: Exception) {
-            Log.w(TAG, "click failed", e)
+            finish("failed", e)
+            return
+        }
+        if (!accepted) {
+            finish("rejected by system")
         }
     }
 

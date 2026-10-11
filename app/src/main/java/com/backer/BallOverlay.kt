@@ -8,6 +8,7 @@ import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.util.DisplayMetrics
+import android.util.Log
 import android.view.Gravity
 import android.view.MotionEvent
 import android.view.View
@@ -100,11 +101,26 @@ class BallOverlay(
     private var cursorDragX = 0f
     private var cursorDragY = 0f
     private var lastDriveTime = 0L
+    private var nextClickId = 0L
+    private var activeClick: CursorClick? = null
+    private var clickDispatched = false
+    private val queuedClicks = ArrayDeque<CursorClick>()
+    private val dispatchClick = Runnable {
+        val click = activeClick ?: return@Runnable
+        if (!mouseMode || !attached) {
+            cancelCursorClicks()
+            return@Runnable
+        }
+        clickDispatched = true
+        service.clickAt(click.x, click.y, click.id) {
+            finishCursorClick(click.id)
+        }
+    }
     private val pendingTap = Runnable {
         tapPending = false
         tapCount = 0
         if (mouseMode) {
-            tapThroughCursor { x, y -> service.clickAt(x, y) }
+            clickThroughCursor()
         } else {
             service.performSystemAction(AccessibilityService.GLOBAL_ACTION_BACK)
         }
@@ -121,12 +137,6 @@ class BallOverlay(
             volumeStart = audio.getStreamVolume(AudioManager.STREAM_MUSIC)
             volumeDownY = downRawY
             volumeLast = volumeStart
-        }
-    }
-    // through it. Dim it to alpha 0 for the dispatch window, then restore it.
-    private val restoreCursor = Runnable {
-        if (mouseMode) {
-            cursor.setDim(false)
         }
     }
     private var dragOriginX = 0
@@ -151,7 +161,6 @@ class BallOverlay(
 
     fun detach() {
         handler.removeCallbacks(pendingTap)
-        handler.removeCallbacks(restoreCursor)
         handler.removeCallbacks(volumeHold)
         volumeDriving = false
         volumeArmed = false
@@ -185,10 +194,8 @@ class BallOverlay(
 
     private fun onDown(event: MotionEvent) {
         pressed.value = true
-        // Every new touch starts with a visible cursor. A prior dispatch may have
-        // left it dimmed with a restore still queued.
-        handler.removeCallbacks(restoreCursor)
-        if (mouseMode) {
+        // New touches must not expose the cursor while a click is preparing or running.
+        if (mouseMode && activeClick == null) {
             cursor.setDim(false)
         }
         downRawX = event.rawX
@@ -205,14 +212,14 @@ class BallOverlay(
         handler.removeCallbacks(volumeHold)
         dragOriginX = params.x
         dragOriginY = params.y
-        // Arm volume hold only on the second tap in normal mode. A quick lift
-        // runs the mouse toggle as before. A hold enters volume mode instead.
-        if (tapCount >= 1 && !mouseMode) {
-            // Kill the first tap's pending Back. It must not fire during the hold.
+        // Reserve the second touch before the first tap timer expires in either mode.
+        if (tapCount >= 1) {
             handler.removeCallbacks(pendingTap)
             tapPending = false
-            volumeArmed = true
-            handler.postDelayed(volumeHold, HOLD_MS)
+            if (!mouseMode) {
+                volumeArmed = true
+                handler.postDelayed(volumeHold, HOLD_MS)
+            }
         }
     }
 
@@ -389,22 +396,56 @@ class BallOverlay(
         service.performSystemAction(action)
     }
 
-    private fun tapThroughCursor(dispatch: (Float, Float) -> Unit) {
-        val x = cursor.centerX
-        val y = cursor.centerY
+    private fun clickThroughCursor() {
+        if (!mouseMode || !attached) return
+        val click = CursorClick(++nextClickId, cursor.centerX, cursor.centerY)
+        Log.d(TAG, "click ${click.id} queued at ${click.x},${click.y}")
+        queuedClicks.addLast(click)
+        if (activeClick == null) {
+            startNextCursorClick()
+        }
+    }
+
+    private fun startNextCursorClick() {
+        val click = queuedClicks.removeFirstOrNull() ?: return
+        activeClick = click
+        clickDispatched = false
+        // Only one click owns the hidden cursor. Overlapping dispatches cancel each other.
         cursor.setDim(true)
-        handler.postDelayed({
-            dispatch(x, y)
-            handler.removeCallbacks(restoreCursor)
-            handler.postDelayed(restoreCursor, CURSOR_RESTORE_MS)
-        }, CURSOR_HIDE_MS)
+        Log.d(TAG, "click ${click.id} preparing")
+        handler.postDelayed(dispatchClick, CURSOR_HIDE_MS)
+    }
+
+    private fun finishCursorClick(clickId: Long) {
+        // A callback from a previous mouse session must not change the new session.
+        if (activeClick?.id != clickId) return
+        activeClick = null
+        clickDispatched = false
+        if (queuedClicks.isNotEmpty()) {
+            startNextCursorClick()
+        } else if (mouseMode && attached) {
+            cursor.setDim(false)
+        }
+    }
+
+    private fun cancelCursorClicks() {
+        handler.removeCallbacks(dispatchClick)
+        activeClick?.let { click ->
+            val state = if (clickDispatched) "dispatched" else "preparing"
+            Log.d(TAG, "click ${click.id} $state tracking cleared on mouse exit")
+        }
+        for (click in queuedClicks) {
+            Log.d(TAG, "click ${click.id} queued cancelled on mouse exit")
+        }
+        queuedClicks.clear()
+        activeClick = null
+        clickDispatched = false
     }
 
     private fun cancelGesture() {
         handler.removeCallbacks(pendingTap)
-        handler.removeCallbacks(restoreCursor)
         handler.removeCallbacks(volumeHold)
-        if (mouseMode) {
+        if (mouseMode && activeClick == null) {
             cursor.setDim(false)
         }
         mouseDriving = false
@@ -432,7 +473,7 @@ class BallOverlay(
 
     private fun exitMouseMode() {
         mouseMode = false
-        handler.removeCallbacks(restoreCursor)
+        cancelCursorClicks()
         cursor.setDim(false)
         cursor.hide()
     }
@@ -487,6 +528,8 @@ class BallOverlay(
             .apply()
     }
 
+    private data class CursorClick(val id: Long, val x: Float, val y: Float)
+
     private enum class Axis {
         NONE,
         HORIZONTAL,
@@ -508,7 +551,7 @@ class BallOverlay(
         private const val DRIVE_CAP_DP = 96f
         private const val SCROLL_DP = 200f
         private const val CURSOR_HIDE_MS = 50L
-        private const val CURSOR_RESTORE_MS = 300L
+        private const val TAG = "Backer"
         private const val MOUSE_DRIVE_SLOP_DP = 8f
         private const val VOLUME_RANGE_DP = 200f
     }
