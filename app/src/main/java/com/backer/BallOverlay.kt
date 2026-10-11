@@ -3,6 +3,7 @@ package com.backer
 import android.accessibilityservice.AccessibilityService
 import android.content.Context
 import android.graphics.PixelFormat
+import android.media.AudioManager
 import android.os.Build
 import android.os.Handler
 import android.os.Looper
@@ -49,12 +50,14 @@ class BallOverlay(
     private val service: BackerAccessibilityService
 ) {
     private val windowManager = service.getSystemService(Context.WINDOW_SERVICE) as WindowManager
+    private val audio = service.getSystemService(Context.AUDIO_SERVICE) as AudioManager
     private val density = service.resources.displayMetrics.density
     private val ballSizePx = (BALL_SIZE_DP * density).toInt()
     private val tapSlopPx = TAP_SLOP_DP * density
     private val swipeSlopPx = SWIPE_SLOP_DP * density
     private val scrollPx = SCROLL_DP * density
     private val mouseDriveSlopPx = MOUSE_DRIVE_SLOP_DP * density
+    private val volumeRangePx = VOLUME_RANGE_DP * density
     private val driveCapPx = DRIVE_CAP_DP * density
     private val cursor = MouseCursor(service)
 
@@ -88,6 +91,12 @@ class BallOverlay(
     private var holdConsumed = false
     private var mouseMode = false
     private var mouseDriving = false
+    private var volumeDriving = false
+    private var volumeArmed = false
+    private var volumeStart = 0
+    private var volumeMax = 1
+    private var volumeDownY = 0f
+    private var volumeLast = -1
     private var cursorDragX = 0f
     private var cursorDragY = 0f
     private var lastDriveTime = 0L
@@ -100,7 +109,20 @@ class BallOverlay(
             service.performSystemAction(AccessibilityService.GLOBAL_ACTION_BACK)
         }
     }
-    // The cursor overlay counts as an obscuring window, so the system drops taps
+    // Second tap held past HOLD_MS enters volume mode instead of mouse toggle.
+    private val volumeHold = Runnable {
+        if (volumeArmed && !mouseMode && !moving && !swiping) {
+            handler.removeCallbacks(pendingTap)
+            tapPending = false
+            tapCount = 0
+            volumeArmed = false
+            volumeDriving = true
+            volumeMax = audio.getStreamMaxVolume(AudioManager.STREAM_MUSIC).coerceAtLeast(1)
+            volumeStart = audio.getStreamVolume(AudioManager.STREAM_MUSIC)
+            volumeDownY = downRawY
+            volumeLast = volumeStart
+        }
+    }
     // through it. Dim it to alpha 0 for the dispatch window, then restore it.
     private val restoreCursor = Runnable {
         if (mouseMode) {
@@ -130,6 +152,9 @@ class BallOverlay(
     fun detach() {
         handler.removeCallbacks(pendingTap)
         handler.removeCallbacks(restoreCursor)
+        handler.removeCallbacks(volumeHold)
+        volumeDriving = false
+        volumeArmed = false
         pressed.value = false
         exitMouseMode()
         val current = view ?: return
@@ -175,8 +200,20 @@ class BallOverlay(
         swipeFired = false
         holdConsumed = false
         mouseDriving = false
+        volumeDriving = false
+        volumeArmed = false
+        handler.removeCallbacks(volumeHold)
         dragOriginX = params.x
         dragOriginY = params.y
+        // Arm volume hold only on the second tap in normal mode. A quick lift
+        // runs the mouse toggle as before. A hold enters volume mode instead.
+        if (tapCount >= 1 && !mouseMode) {
+            // Kill the first tap's pending Back. It must not fire during the hold.
+            handler.removeCallbacks(pendingTap)
+            tapPending = false
+            volumeArmed = true
+            handler.postDelayed(volumeHold, HOLD_MS)
+        }
     }
 
     private fun onMove(event: MotionEvent) {
@@ -185,6 +222,16 @@ class BallOverlay(
         val travel = hypot(dx, dy)
         val held = event.eventTime - downTime
 
+        // Volume drive. Up raises media volume, down lowers it over VOLUME_RANGE_DP.
+        if (volumeDriving) {
+            val steps = ((volumeDownY - event.rawY) / volumeRangePx * volumeMax).toInt()
+            val level = (volumeStart + steps).coerceIn(0, volumeMax)
+            if (level != volumeLast) {
+                volumeLast = level
+                audio.setStreamVolume(AudioManager.STREAM_MUSIC, level, AudioManager.FLAG_SHOW_UI)
+            }
+            return
+        }
         // Mouse drive is continuous. Hold past HOLD_MS or push past the drive gate,
         // then every move shifts the cursor. No scroll branch. Release ends it.
         if (mouseMode && !mouseDriving && (held >= HOLD_MS || travel >= mouseDriveSlopPx)) {
@@ -221,7 +268,7 @@ class BallOverlay(
             downRawY = event.rawY
             return
         }
-        if (!mouseMode && !moving && !swiping && held >= HOLD_MS) {
+        if (!mouseMode && !volumeArmed && !moving && !swiping && held >= HOLD_MS) {
             handler.removeCallbacks(pendingTap)
             tapPending = false
             tapCount = 0
@@ -245,7 +292,7 @@ class BallOverlay(
             return
         }
         // A press that stays put past the hold window is not a tap and not a move.
-        if (!mouseMode && held >= HOLD_MS) {
+        if (!mouseMode && !volumeArmed && held >= HOLD_MS) {
             holdConsumed = true
         }
     }
@@ -262,6 +309,15 @@ class BallOverlay(
             pressed.value = false
             tapCount = 0
             moving = false
+            return
+        }
+        // A volume drive ends on release with no action.
+        if (volumeDriving) {
+            handler.removeCallbacks(volumeHold)
+            pressed.value = false
+            tapCount = 0
+            volumeDriving = false
+            volumeArmed = false
             return
         }
         // A mouse drive ends on release with no action. The cursor stays where it stopped.
@@ -286,6 +342,8 @@ class BallOverlay(
         }
         if (travel <= tapSlopPx && held <= TAP_MS) {
             pressed.value = false
+            handler.removeCallbacks(volumeHold)
+            volumeArmed = false
             tapCount += 1
             if (tapCount >= 2) {
                 handler.removeCallbacks(pendingTap)
@@ -304,6 +362,8 @@ class BallOverlay(
             return
         }
         handler.removeCallbacks(pendingTap)
+        handler.removeCallbacks(volumeHold)
+        volumeArmed = false
         pressed.value = false
         tapPending = false
         tapCount = 0
@@ -343,10 +403,13 @@ class BallOverlay(
     private fun cancelGesture() {
         handler.removeCallbacks(pendingTap)
         handler.removeCallbacks(restoreCursor)
+        handler.removeCallbacks(volumeHold)
         if (mouseMode) {
             cursor.setDim(false)
         }
         mouseDriving = false
+        volumeDriving = false
+        volumeArmed = false
         pressed.value = false
         tapPending = false
         tapCount = 0
@@ -447,6 +510,7 @@ class BallOverlay(
         private const val CURSOR_HIDE_MS = 50L
         private const val CURSOR_RESTORE_MS = 300L
         private const val MOUSE_DRIVE_SLOP_DP = 8f
+        private const val VOLUME_RANGE_DP = 200f
     }
 }
 
