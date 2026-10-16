@@ -12,6 +12,7 @@ import android.util.Log
 import android.view.Gravity
 import android.view.MotionEvent
 import android.view.View
+import android.view.ViewTreeObserver
 import android.view.WindowManager
 import android.view.WindowMetrics
 import androidx.compose.foundation.Canvas
@@ -145,6 +146,9 @@ class BallOverlay(
     fun attach() {
         if (attached) return
         loadPosition()
+        // Rotation changes pixel size. Reapply the saved fractions on layout changes
+        // so the ball keeps its relative spot instead of sticking to old pixels.
+        view?.viewTreeObserver?.removeOnGlobalLayoutListener(layoutListener)
         val composeView = ComposeView(service).apply {
             setViewCompositionStrategy(ViewCompositionStrategy.DisposeOnDetachedFromWindow)
             setViewTreeLifecycleOwner(owner)
@@ -155,6 +159,7 @@ class BallOverlay(
         }
         owner.start()
         view = composeView
+        composeView.viewTreeObserver.addOnGlobalLayoutListener(layoutListener)
         windowManager.addView(composeView, params)
         attached = true
     }
@@ -162,6 +167,7 @@ class BallOverlay(
     fun detach() {
         handler.removeCallbacks(pendingTap)
         handler.removeCallbacks(volumeHold)
+        view?.viewTreeObserver?.removeOnGlobalLayoutListener(layoutListener)
         volumeDriving = false
         volumeArmed = false
         pressed.value = false
@@ -174,6 +180,19 @@ class BallOverlay(
         }
         owner.stop()
         view = null
+    }
+
+    // WindowManager does not relayout a fixed overlay on rotation. Track the last
+    // bounds and reapply fractions when they change.
+    private var lastWidth = 0
+    private var lastHeight = 0
+    private val layoutListener = ViewTreeObserver.OnGlobalLayoutListener {
+        val bounds = screenBounds()
+        if (bounds.first != lastWidth || bounds.second != lastHeight) {
+            lastWidth = bounds.first
+            lastHeight = bounds.second
+            applyFractions(loadFractions(), bounds)
+        }
     }
 
     private fun handleTouch(event: MotionEvent): Boolean {
@@ -503,28 +522,56 @@ class BallOverlay(
     }
 
     private fun loadPosition() {
-        val prefs = service.getSharedPreferences(BackerAccessibilityService.PREFS_NAME, Context.MODE_PRIVATE)
         val bounds = screenBounds()
-        val defaultX = (bounds.first - ballSizePx - (16 * density).toInt()).coerceAtLeast(0)
-        val defaultY = ((bounds.second - ballSizePx) / 2).coerceAtLeast(0)
-        if (!prefs.contains(BackerAccessibilityService.KEY_BALL_X)) {
-            params.x = defaultX
-            params.y = defaultY
-            return
+        lastWidth = bounds.first
+        lastHeight = bounds.second
+        applyFractions(loadFractions(), bounds)
+    }
+
+    private fun loadFractions(): Pair<Float, Float> {
+        val prefs = service.getSharedPreferences(BackerAccessibilityService.PREFS_NAME, Context.MODE_PRIVATE)
+        if (prefs.contains(BackerAccessibilityService.KEY_BALL_FX)) {
+            return prefs.getFloat(BackerAccessibilityService.KEY_BALL_FX, 0.85f) to
+                prefs.getFloat(BackerAccessibilityService.KEY_BALL_FY, 0.5f)
         }
-        params.x = prefs.getInt(BackerAccessibilityService.KEY_BALL_X, defaultX)
-        params.y = prefs.getInt(BackerAccessibilityService.KEY_BALL_Y, defaultY)
+        val bounds = screenBounds()
+        val maxX = (bounds.first - ballSizePx).coerceAtLeast(1)
+        val maxY = (bounds.second - ballSizePx).coerceAtLeast(1)
+        // One-time migration from absolute pixels. Then the old keys are deleted.
+        if (prefs.contains(BackerAccessibilityService.KEY_BALL_X)) {
+            val fx = prefs.getInt(BackerAccessibilityService.KEY_BALL_X, maxX) / maxX.toFloat()
+            val fy = prefs.getInt(BackerAccessibilityService.KEY_BALL_Y, maxY / 2) / maxY.toFloat()
+            prefs.edit()
+                .putFloat(BackerAccessibilityService.KEY_BALL_FX, fx.coerceIn(0f, 1f))
+                .putFloat(BackerAccessibilityService.KEY_BALL_FY, fy.coerceIn(0f, 1f))
+                .remove(BackerAccessibilityService.KEY_BALL_X)
+                .remove(BackerAccessibilityService.KEY_BALL_Y)
+                .apply()
+            return prefs.getFloat(BackerAccessibilityService.KEY_BALL_FX, 0.85f) to
+                prefs.getFloat(BackerAccessibilityService.KEY_BALL_FY, 0.5f)
+        }
+        return 0.85f to 0.5f
+    }
+
+    private fun applyFractions(fractions: Pair<Float, Float>, bounds: Pair<Int, Int>) {
         val maxX = (bounds.first - ballSizePx).coerceAtLeast(0)
         val maxY = (bounds.second - ballSizePx).coerceAtLeast(0)
-        params.x = params.x.coerceIn(0, maxX)
-        params.y = params.y.coerceIn(0, maxY)
+        params.x = (fractions.first.coerceIn(0f, 1f) * maxX).toInt()
+        params.y = (fractions.second.coerceIn(0f, 1f) * maxY).toInt()
+        val current = view ?: return
+        if (attached) {
+            windowManager.updateViewLayout(current, params)
+        }
     }
 
     private fun savePosition() {
+        val bounds = screenBounds()
+        val maxX = (bounds.first - ballSizePx).coerceAtLeast(1)
+        val maxY = (bounds.second - ballSizePx).coerceAtLeast(1)
         service.getSharedPreferences(BackerAccessibilityService.PREFS_NAME, Context.MODE_PRIVATE)
             .edit()
-            .putInt(BackerAccessibilityService.KEY_BALL_X, params.x)
-            .putInt(BackerAccessibilityService.KEY_BALL_Y, params.y)
+            .putFloat(BackerAccessibilityService.KEY_BALL_FX, (params.x / maxX.toFloat()).coerceIn(0f, 1f))
+            .putFloat(BackerAccessibilityService.KEY_BALL_FY, (params.y / maxY.toFloat()).coerceIn(0f, 1f))
             .apply()
     }
 

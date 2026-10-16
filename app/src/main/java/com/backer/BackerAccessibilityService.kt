@@ -8,6 +8,7 @@ import android.os.Handler
 import android.os.Looper
 import android.provider.Settings
 import android.util.Log
+import android.view.ViewTreeObserver
 import android.view.accessibility.AccessibilityEvent
 import java.lang.ref.WeakReference
 
@@ -127,6 +128,8 @@ class BackerAccessibilityService : AccessibilityService() {
 
     companion object {
         const val PREFS_NAME = "backer_ball"
+        const val KEY_BALL_FX = "ball_fx"
+        const val KEY_BALL_FY = "ball_fy"
         const val KEY_BALL_X = "ball_x"
         const val KEY_BALL_Y = "ball_y"
 
