@@ -4,10 +4,12 @@ import android.accessibilityservice.AccessibilityService
 import android.accessibilityservice.GestureDescription
 import android.content.Context
 import android.graphics.Path
+import android.graphics.Rect
 import android.os.Handler
 import android.os.Looper
 import android.provider.Settings
 import android.util.Log
+import android.view.accessibility.AccessibilityNodeInfo
 import android.view.ViewTreeObserver
 import android.view.accessibility.AccessibilityEvent
 import java.lang.ref.WeakReference
@@ -62,6 +64,62 @@ class BackerAccessibilityService : AccessibilityService() {
     }
 
     fun clickAt(x: Float, y: Float, clickId: Long, onFinished: () -> Unit) {
+        if (clickNodeAt(x, y, clickId)) {
+            onFinished()
+            return
+        }
+        dispatchTap(x, y, clickId, onFinished)
+    }
+
+    // Web content often ignores screen taps but answers node clicks.
+    // Try the deepest clickable node at the point first.
+    private fun clickNodeAt(x: Float, y: Float, clickId: Long): Boolean {
+        try {
+            val roots = listOfNotNull(rootInActiveWindow) + windows.mapNotNull { it.root }
+            for (root in roots) {
+                val node = findClickableAt(root, x.toInt(), y.toInt())
+                if (node != null) {
+                    val acted = node.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+                    Log.d(TAG, "click $clickId node ${node.className} acted=$acted")
+                    node.recycle()
+                    if (acted) return true
+                }
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "click $clickId node failed", e)
+        }
+        return false
+    }
+
+    private fun findClickableAt(root: AccessibilityNodeInfo, x: Int, y: Int): AccessibilityNodeInfo? {
+        val stack = ArrayDeque<AccessibilityNodeInfo>()
+        stack.addLast(root)
+        val bounds = Rect()
+        var best: AccessibilityNodeInfo? = null
+        var bestArea = Int.MAX_VALUE
+        while (stack.isNotEmpty()) {
+            val node = stack.removeLast()
+            node.getBoundsInScreen(bounds)
+            if (bounds.contains(x, y)) {
+                if (node.isClickable) {
+                    val area = bounds.width() * bounds.height()
+                    if (area < bestArea && area > 0) {
+                        best?.recycle()
+                        best = AccessibilityNodeInfo.obtain(node)
+                        bestArea = area
+                    }
+                }
+                for (i in 0 until node.childCount) {
+                    node.getChild(i)?.let { stack.addLast(it) }
+                }
+            }
+            if (node !== root && node !== best) node.recycle()
+        }
+        if (root !== best) root.recycle()
+        return best
+    }
+
+    private fun dispatchTap(x: Float, y: Float, clickId: Long, onFinished: () -> Unit) {
         var finished = false
         fun finish(result: String, error: Exception? = null) {
             if (finished) return
@@ -87,9 +145,10 @@ class BackerAccessibilityService : AccessibilityService() {
             val cx = x.coerceAtLeast(0f)
             val cy = y.coerceAtLeast(0f)
             Log.d(TAG, "click $clickId dispatch at $cx,$cy")
+            // Vertical 1px path reads as tap. Diagonal can read as scroll in WebView.
             val path = Path().apply {
                 moveTo(cx, cy)
-                lineTo(cx + 4f, cy + 4f)
+                lineTo(cx, cy + 1f)
             }
             val stroke = GestureDescription.StrokeDescription(path, 0L, CLICK_DURATION_MS)
             dispatchGesture(GestureDescription.Builder().addStroke(stroke).build(), callback, gestureHandler)
