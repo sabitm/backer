@@ -584,7 +584,7 @@ class BallOverlay(
     }
 
     companion object {
-        private const val BALL_SIZE_DP = 52f
+        private const val BALL_SIZE_DP = 56f
         private const val TAP_SLOP_DP = 16f
         private const val SWIPE_SLOP_DP = 16f
         private const val TAP_MS = 200L
@@ -606,25 +606,46 @@ class BallOverlay(
 
 @Composable
 private fun BallFace(flash: Boolean) {
-    Canvas(modifier = Modifier.size(52.dp)) {
+    Canvas(modifier = Modifier.size(56.dp)) {
+        val center = Offset(size.width / 2f, size.height / 2f)
         val radius = size.minDimension / 2f
+        if (flash) {
+            drawCircle(color = Color.White, radius = radius, center = center)
+            val chevron = Path().apply {
+                moveTo(size.width * 0.60f, size.height * 0.36f)
+                lineTo(size.width * 0.42f, size.height * 0.50f)
+                lineTo(size.width * 0.60f, size.height * 0.64f)
+            }
+            drawPath(
+                path = chevron,
+                color = Color(0xFF1C1B1F).copy(alpha = 0.85f),
+                style = Stroke(width = size.minDimension * 0.09f)
+            )
+            return@Canvas
+        }
         drawCircle(
-            color = if (flash) {
-                Color.White
-            } else {
-                Color(0xFF1C1B1F).copy(alpha = 0.45f)
-            },
+            color = Color(0xFF1C1B1F).copy(alpha = 0.65f),
             radius = radius,
-            center = Offset(size.width / 2f, size.height / 2f)
+            center = center
+        )
+        drawCircle(
+            color = Color(0xFF5F6368).copy(alpha = 0.65f),
+            radius = radius * 0.76f,
+            center = center
+        )
+        drawCircle(
+            color = Color.White.copy(alpha = 0.75f),
+            radius = radius * 0.60f,
+            center = center
         )
         val chevron = Path().apply {
-            moveTo(size.width * 0.62f, size.height * 0.30f)
-            lineTo(size.width * 0.38f, size.height * 0.50f)
-            lineTo(size.width * 0.62f, size.height * 0.70f)
+            moveTo(size.width * 0.58f, size.height * 0.40f)
+            lineTo(size.width * 0.44f, size.height * 0.50f)
+            lineTo(size.width * 0.58f, size.height * 0.60f)
         }
         drawPath(
             path = chevron,
-            color = if (flash) Color(0xFF1C1B1F).copy(alpha = 0.70f) else Color.White.copy(alpha = 0.70f),
+            color = Color(0xFF1C1B1F).copy(alpha = 0.85f),
             style = Stroke(width = size.minDimension * 0.07f)
         )
     }
