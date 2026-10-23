@@ -64,62 +64,61 @@ class BackerAccessibilityService : AccessibilityService() {
     }
 
     fun clickAt(x: Float, y: Float, clickId: Long, onFinished: () -> Unit) {
-        if (clickNodeAt(x, y, clickId)) {
-            onFinished()
-            return
-        }
-        dispatchTap(x, y, clickId, onFinished)
+        // Gesture-first won testing: Chrome fully, FB WebView after one scroll.
+        // Duration differs by content. Web gets a longer press.
+        val web = isWebViewPoint(x, y)
+        Log.d(TAG, "click $clickId path=${if (web) "web" else "native"}")
+        dispatchTap(x, y, clickId, if (web) WEB_CLICK_DURATION_MS else CLICK_DURATION_MS, onFinished)
     }
 
-    // Web content often ignores screen taps but answers node clicks.
-    // Try the deepest clickable node at the point first.
-    private fun clickNodeAt(x: Float, y: Float, clickId: Long): Boolean {
+    private fun isWebViewPoint(x: Float, y: Float): Boolean {
         try {
-            val roots = listOfNotNull(rootInActiveWindow) + windows.mapNotNull { it.root }
-            for (root in roots) {
-                val node = findClickableAt(root, x.toInt(), y.toInt())
-                if (node != null) {
-                    val acted = node.performAction(AccessibilityNodeInfo.ACTION_CLICK)
-                    Log.d(TAG, "click $clickId node ${node.className} acted=$acted")
-                    node.recycle()
-                    if (acted) return true
-                }
+            val activeRoot = rootInActiveWindow
+            val ordered = windows.mapNotNull { it.root } + listOfNotNull(activeRoot)
+            for (root in ordered) {
+                val hit = subtreeHasWebView(root, x.toInt(), y.toInt())
+                // subtreeHasWebView never recycles its root argument. Recycle it here.
+                root.recycle()
+                if (hit) return true
             }
         } catch (e: Exception) {
-            Log.w(TAG, "click $clickId node failed", e)
+            Log.w(TAG, "webview check failed", e)
         }
         return false
     }
 
-    private fun findClickableAt(root: AccessibilityNodeInfo, x: Int, y: Int): AccessibilityNodeInfo? {
+    private fun subtreeHasWebView(root: AccessibilityNodeInfo, x: Int, y: Int): Boolean {
         val stack = ArrayDeque<AccessibilityNodeInfo>()
         stack.addLast(root)
         val bounds = Rect()
-        var best: AccessibilityNodeInfo? = null
-        var bestArea = Int.MAX_VALUE
+        var found = false
         while (stack.isNotEmpty()) {
             val node = stack.removeLast()
             node.getBoundsInScreen(bounds)
-            if (bounds.contains(x, y)) {
-                if (node.isClickable) {
-                    val area = bounds.width() * bounds.height()
-                    if (area < bestArea && area > 0) {
-                        best?.recycle()
-                        best = AccessibilityNodeInfo.obtain(node)
-                        bestArea = area
-                    }
-                }
+            val inside = bounds.contains(x, y)
+            val cls = node.className?.toString() ?: ""
+            if (inside && cls.contains("WebView", ignoreCase = true)) {
+                found = true
+            }
+            // Only descend into branches that contain the point.
+            if (inside && !found) {
                 for (i in 0 until node.childCount) {
                     node.getChild(i)?.let { stack.addLast(it) }
                 }
             }
-            if (node !== root && node !== best) node.recycle()
+            if (node !== root) node.recycle()
+            if (found) {
+                while (stack.isNotEmpty()) {
+                    val rest = stack.removeLast()
+                    if (rest !== root) rest.recycle()
+                }
+                return true
+            }
         }
-        if (root !== best) root.recycle()
-        return best
+        return false
     }
 
-    private fun dispatchTap(x: Float, y: Float, clickId: Long, onFinished: () -> Unit) {
+    private fun dispatchTap(x: Float, y: Float, clickId: Long, durationMs: Long, onFinished: () -> Unit) {
         var finished = false
         fun finish(result: String, error: Exception? = null) {
             if (finished) return
@@ -144,13 +143,13 @@ class BackerAccessibilityService : AccessibilityService() {
         val accepted = try {
             val cx = x.coerceAtLeast(0f)
             val cy = y.coerceAtLeast(0f)
-            Log.d(TAG, "click $clickId dispatch at $cx,$cy")
-            // Vertical 1px path reads as tap. Diagonal can read as scroll in WebView.
+            Log.d(TAG, "click $clickId dispatch at $cx,$cy duration=$durationMs")
+            // Vertical 2px path reads as tap. Diagonal can read as scroll in WebView.
             val path = Path().apply {
                 moveTo(cx, cy)
-                lineTo(cx, cy + 1f)
+                lineTo(cx, cy + 2f)
             }
-            val stroke = GestureDescription.StrokeDescription(path, 0L, CLICK_DURATION_MS)
+            val stroke = GestureDescription.StrokeDescription(path, 0L, durationMs)
             dispatchGesture(GestureDescription.Builder().addStroke(stroke).build(), callback, gestureHandler)
         } catch (e: Exception) {
             finish("failed", e)
@@ -193,6 +192,7 @@ class BackerAccessibilityService : AccessibilityService() {
         const val KEY_BALL_Y = "ball_y"
 
         private const val CLICK_DURATION_MS = 100L
+        private const val WEB_CLICK_DURATION_MS = 150L
         private const val SCROLL_DURATION_MS = 300L
         private const val TAG = "Backer"
 
