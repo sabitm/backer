@@ -60,6 +60,8 @@ class BallOverlay(
     private val scrollPx = SCROLL_DP * density
     private val mouseDriveSlopPx = MOUSE_DRIVE_SLOP_DP * density
     private val volumeRangePx = VOLUME_RANGE_DP * density
+    // Drift under this at lift still counts as a stationary hold.
+    private val longPressSlopPx = LONG_PRESS_SLOP_DP * density
     private val driveCapPx = DRIVE_CAP_DP * density
     private val cursor = MouseCursor(service)
     private val menu = ActionMenu(service)
@@ -105,6 +107,11 @@ class BallOverlay(
     private var lastDriveTime = 0L
     private var nextClickId = 0L
     private var activeClick: CursorClick? = null
+    private var pressArmed = false
+    private var pressLatched = false
+    private var pressLatchX = 0f
+    private var pressLatchY = 0f
+    private var nextPressId = 0L
     private var clickDispatched = false
     private val queuedClicks = ArrayDeque<CursorClick>()
     private val dispatchClick = Runnable {
@@ -151,6 +158,17 @@ class BallOverlay(
             volumeLast = volumeStart
         }
     }
+    // Second tap held past HOLD_MS in cursor mode latches a press. Nothing injects
+    // while the finger is down. Lift fires the gesture so the system cannot cancel it.
+    private val pressHold = Runnable {
+        if (pressArmed && mouseMode && !mouseDriving && !pressLatched) {
+            handler.removeCallbacks(pendingTap)
+            tapPending = false
+            tapCount = 0
+            pressArmed = false
+            latchPress()
+        }
+    }
     private var dragOriginX = 0
     private var dragOriginY = 0
 
@@ -178,8 +196,10 @@ class BallOverlay(
     fun detach() {
         handler.removeCallbacks(pendingTap)
         handler.removeCallbacks(volumeHold)
+        handler.removeCallbacks(pressHold)
         view?.viewTreeObserver?.removeOnGlobalLayoutListener(layoutListener)
         menu.hide()
+        unlatchPress()
         volumeDriving = false
         volumeArmed = false
         pressed.value = false
@@ -250,6 +270,9 @@ class BallOverlay(
             if (!mouseMode) {
                 volumeArmed = true
                 handler.postDelayed(volumeHold, HOLD_MS)
+            } else {
+                pressArmed = true
+                handler.postDelayed(pressHold, HOLD_MS)
             }
         }
     }
@@ -272,7 +295,25 @@ class BallOverlay(
         }
         // Mouse drive is continuous. Hold past HOLD_MS or push past the drive gate,
         // then every move shifts the cursor. No scroll branch. Release ends it.
+        // A reserved second touch latches a press instead. Its moves shift the
+        // cursor with no injection. Lift fires one gesture for the whole press.
         if (mouseMode && !mouseDriving && (held >= HOLD_MS || travel >= mouseDriveSlopPx)) {
+            if (pressLatched) {
+                driveCursorTo(event, dx, dy)
+                return
+            }
+            if (pressArmed) {
+                if (travel >= mouseDriveSlopPx) {
+                    latchPress()
+                    // Drop the entry sample like plain drive entry.
+                    lastDriveTime = event.eventTime
+                    downRawX = event.rawX
+                    downRawY = event.rawY
+                    return
+                }
+                // Still holding still. Wait for the press timer.
+                return
+            }
             handler.removeCallbacks(pendingTap)
             tapPending = false
             tapCount = 0
@@ -287,23 +328,7 @@ class BallOverlay(
             return
         }
         if (mouseMode && mouseDriving) {
-            // Touchpad-style gain. Slow moves stay DRIVE_BASE_GAIN for control.
-            // Fast flings scale up to DRIVE_MAX_GAIN to cross the screen in one stroke.
-            val dt = (event.eventTime - lastDriveTime).coerceAtLeast(1L) / 1000f
-            val speed = hypot(dx, dy) / dt
-            val gain = when {
-                speed <= DRIVE_SLOW_PX_S -> DRIVE_BASE_GAIN
-                speed >= DRIVE_FAST_PX_S -> DRIVE_MAX_GAIN
-                else -> DRIVE_BASE_GAIN + (speed - DRIVE_SLOW_PX_S) / (DRIVE_FAST_PX_S - DRIVE_SLOW_PX_S) * (DRIVE_MAX_GAIN - DRIVE_BASE_GAIN)
-            }
-            lastDriveTime = event.eventTime
-            val stepX = (dx * gain).coerceIn(-driveCapPx, driveCapPx)
-            val stepY = (dy * gain).coerceIn(-driveCapPx, driveCapPx)
-            cursorDragX = cursor.clampX(cursorDragX + stepX)
-            cursorDragY = cursor.clampY(cursorDragY + stepY)
-            cursor.moveTo(cursorDragX, cursorDragY)
-            downRawX = event.rawX
-            downRawY = event.rawY
+            driveCursorTo(event, dx, dy)
             return
         }
         if (!mouseMode && !volumeArmed && !moving && !swiping && held >= HOLD_MS) {
@@ -335,6 +360,49 @@ class BallOverlay(
         }
     }
 
+    // Shared touchpad drive math for plain cursor moves and press-drag.
+    private fun driveCursorTo(event: MotionEvent, dx: Float, dy: Float) {
+        // Touchpad-style gain. Slow moves stay DRIVE_BASE_GAIN for control.
+        // Fast flings scale up to DRIVE_MAX_GAIN to cross the screen in one stroke.
+        val dt = (event.eventTime - lastDriveTime).coerceAtLeast(1L) / 1000f
+        val speed = hypot(dx, dy) / dt
+        val gain = when {
+            speed <= DRIVE_SLOW_PX_S -> DRIVE_BASE_GAIN
+            speed >= DRIVE_FAST_PX_S -> DRIVE_MAX_GAIN
+            else -> DRIVE_BASE_GAIN + (speed - DRIVE_SLOW_PX_S) / (DRIVE_FAST_PX_S - DRIVE_SLOW_PX_S) * (DRIVE_MAX_GAIN - DRIVE_BASE_GAIN)
+        }
+        lastDriveTime = event.eventTime
+        val stepX = (dx * gain).coerceIn(-driveCapPx, driveCapPx)
+        val stepY = (dy * gain).coerceIn(-driveCapPx, driveCapPx)
+        cursorDragX = cursor.clampX(cursorDragX + stepX)
+        cursorDragY = cursor.clampY(cursorDragY + stepY)
+        cursor.moveTo(cursorDragX, cursorDragY)
+        downRawX = event.rawX
+        downRawY = event.rawY
+    }
+
+    private fun latchPress() {
+        handler.removeCallbacks(pressHold)
+        handler.removeCallbacks(pendingTap)
+        tapPending = false
+        tapCount = 0
+        pressArmed = false
+        pressLatched = true
+        pressLatchX = cursor.centerX
+        pressLatchY = cursor.centerY
+        cursorDragX = cursor.x
+        cursorDragY = cursor.y
+        lastDriveTime = android.os.SystemClock.uptimeMillis()
+        cursor.setPressed(true)
+    }
+
+    private fun unlatchPress() {
+        handler.removeCallbacks(pressHold)
+        pressArmed = false
+        pressLatched = false
+        cursor.setPressed(false)
+    }
+
     private fun onUp(event: MotionEvent) {
         val dx = event.rawX - downRawX
         val dy = event.rawY - downRawY
@@ -356,6 +424,37 @@ class BallOverlay(
             tapCount = 0
             volumeDriving = false
             volumeArmed = false
+            return
+        }
+        // A latched press fires on release, when the finger is up. Drift under
+        // the slop counts as stationary long-press. Real displacement fires one
+        // swipe from latch point to release, same as plain scroll.
+        if (mouseMode && pressLatched) {
+            val dx = cursor.centerX - pressLatchX
+            val dy = cursor.centerY - pressLatchY
+            val drift = hypot(dx, dy)
+            Log.d(TAG, "press finger up after ${event.eventTime - downTime}ms drift=${drift.toInt()}px")
+            val fromX = pressLatchX
+            val fromY = pressLatchY
+            val toX = cursor.centerX
+            val toY = cursor.centerY
+            val stationary = drift <= longPressSlopPx
+            pressed.value = false
+            tapCount = 0
+            unlatchPress()
+            // Same occlusion rule as clicks. The cursor sits on the injection
+            // point, so hide it first and restore when the gesture finishes.
+            cursor.setDim(true)
+            handler.postDelayed({
+                val restore = {
+                    if (mouseMode && attached) cursor.setDim(false)
+                }
+                if (stationary) {
+                    service.longPressAt(fromX, fromY, nextPressId++, restore)
+                } else {
+                    service.scrollAt(fromX, fromY, toX - fromX, toY - fromY, restore)
+                }
+            }, CURSOR_HIDE_MS)
             return
         }
         // A mouse drive ends on release with no action. The cursor stays where it stopped.
@@ -381,7 +480,9 @@ class BallOverlay(
         if (travel <= tapSlopPx && held <= TAP_MS) {
             pressed.value = false
             handler.removeCallbacks(volumeHold)
+            handler.removeCallbacks(pressHold)
             volumeArmed = false
+            pressArmed = false
             tapCount += 1
             if (tapCount >= 3) {
                 handler.removeCallbacks(pendingTap)
@@ -480,9 +581,11 @@ class BallOverlay(
     private fun cancelGesture() {
         handler.removeCallbacks(pendingTap)
         handler.removeCallbacks(volumeHold)
+        handler.removeCallbacks(pressHold)
         if (mouseMode && activeClick == null) {
             cursor.setDim(false)
         }
+        unlatchPress()
         mouseDriving = false
         volumeDriving = false
         volumeArmed = false
@@ -639,6 +742,7 @@ class BallOverlay(
         private const val CURSOR_HIDE_MS = 50L
         private const val TAG = "Backer"
         private const val MOUSE_DRIVE_SLOP_DP = 8f
+        private const val LONG_PRESS_SLOP_DP = 24f
         private const val VOLUME_RANGE_DP = 200f
         private const val SCREENSHOT_DELAY_MS = 300L
     }

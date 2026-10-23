@@ -11,6 +11,8 @@ import android.view.WindowMetrics
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.layout.size
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.MutableState
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
@@ -49,6 +51,7 @@ class MouseCursor(
     private var view: View? = null
     private var attached = false
     private var placed = false
+    private val pressedState: MutableState<Boolean> = mutableStateOf(false)
 
     val isShowing: Boolean
         get() = attached
@@ -85,7 +88,7 @@ class MouseCursor(
             setViewCompositionStrategy(ViewCompositionStrategy.DisposeOnDetachedFromWindow)
             setViewTreeLifecycleOwner(owner)
             setViewTreeSavedStateRegistryOwner(owner)
-            setContent { CursorFace() }
+            setContent { CursorFace(pressedState.value) }
             contentDescription = service.getString(R.string.cursor_content_description)
         }
         owner.start()
@@ -117,6 +120,11 @@ class MouseCursor(
     fun setDim(hidden: Boolean) {
         params.alpha = if (hidden) 0f else 1f
         pushLayout()
+    }
+
+    // Pressed state fills the center dot so press-drag reads as finger-down.
+    fun setPressed(pressed: Boolean) {
+        pressedState.value = pressed
     }
 
     private fun pushLayout() {
@@ -165,7 +173,7 @@ class MouseCursor(
 }
 
 @Composable
-private fun CursorFace() {
+private fun CursorFace(pressed: Boolean) {
     Canvas(modifier = Modifier.size(24.dp)) {
         val center = Offset(size.width / 2f, size.height / 2f)
         val ringRadius = size.minDimension / 2f - 1.dp.toPx()
@@ -188,7 +196,8 @@ private fun CursorFace() {
         )
         drawCircle(
             color = Color.White.copy(alpha = 0.9f),
-            radius = 2.dp.toPx(),
+            // Filled while pressed. Hollow otherwise.
+            radius = if (pressed) 3.dp.toPx() else 2.dp.toPx(),
             center = center
         )
     }

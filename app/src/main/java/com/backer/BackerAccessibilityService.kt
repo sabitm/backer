@@ -160,7 +160,7 @@ class BackerAccessibilityService : AccessibilityService() {
         }
     }
 
-    fun scrollAt(x: Float, y: Float, dx: Float, dy: Float) {
+    fun scrollAt(x: Float, y: Float, dx: Float, dy: Float, onFinished: () -> Unit = {}) {
         if (dx == 0f && dy == 0f) return
         try {
             val cx = x.coerceAtLeast(0f)
@@ -171,11 +171,56 @@ class BackerAccessibilityService : AccessibilityService() {
                 lineTo(cx + dx, cy + dy)
             }
             val stroke = GestureDescription.StrokeDescription(path, 0L, SCROLL_DURATION_MS)
-            if (!dispatchGesture(GestureDescription.Builder().addStroke(stroke).build(), gestureCallback, gestureHandler)) {
+            val callback = object : GestureResultCallback() {
+                override fun onCompleted(gestureDescription: GestureDescription?) {
+                    onFinished()
+                }
+
+                override fun onCancelled(gestureDescription: GestureDescription?) {
+                    onFinished()
+                }
+            }
+            if (!dispatchGesture(GestureDescription.Builder().addStroke(stroke).build(), callback, gestureHandler)) {
                 Log.w(TAG, "scroll rejected by system")
+                onFinished()
             }
         } catch (e: Exception) {
             Log.w(TAG, "scroll failed", e)
+            onFinished()
+        }
+    }
+
+    // Cursor press fires on lift so the finger is up and the system cannot cancel
+    // our touch stream. No move means fixed long-press. Move means one swipe.
+    fun longPressAt(x: Float, y: Float, pressId: Long, onFinished: () -> Unit) {
+        try {
+            val cx = x.coerceAtLeast(0f)
+            val cy = y.coerceAtLeast(0f)
+            Log.d(TAG, "longpress $pressId at $cx,$cy")
+            // Same 2px shape as taps. Only the duration differs.
+            val path = Path().apply {
+                moveTo(cx, cy)
+                lineTo(cx, cy + 2f)
+            }
+            val stroke = GestureDescription.StrokeDescription(path, 0L, LONG_PRESS_DURATION_MS)
+            val callback = object : GestureResultCallback() {
+                override fun onCompleted(gestureDescription: GestureDescription?) {
+                    Log.d(TAG, "longpress $pressId completed")
+                    onFinished()
+                }
+
+                override fun onCancelled(gestureDescription: GestureDescription?) {
+                    Log.w(TAG, "longpress $pressId cancelled by system")
+                    onFinished()
+                }
+            }
+            if (!dispatchGesture(GestureDescription.Builder().addStroke(stroke).build(), callback, gestureHandler)) {
+                Log.w(TAG, "longpress $pressId rejected by system")
+                onFinished()
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "longpress $pressId failed", e)
+            onFinished()
         }
     }
 
@@ -194,6 +239,7 @@ class BackerAccessibilityService : AccessibilityService() {
         private const val CLICK_DURATION_MS = 100L
         private const val WEB_CLICK_DURATION_MS = 150L
         private const val SCROLL_DURATION_MS = 300L
+        private const val LONG_PRESS_DURATION_MS = 800L
         private const val TAG = "Backer"
 
         private var instance: WeakReference<BackerAccessibilityService>? = null
