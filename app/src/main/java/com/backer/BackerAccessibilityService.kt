@@ -72,19 +72,47 @@ class BackerAccessibilityService : AccessibilityService() {
     }
 
     private fun isWebViewPoint(x: Float, y: Float): Boolean {
-        try {
-            val activeRoot = rootInActiveWindow
-            val ordered = windows.mapNotNull { it.root } + listOfNotNull(activeRoot)
-            for (root in ordered) {
-                val hit = subtreeHasWebView(root, x.toInt(), y.toInt())
-                // subtreeHasWebView never recycles its root argument. Recycle it here.
-                root.recycle()
-                if (hit) return true
-            }
+        val winInfos = try {
+            windows
         } catch (e: Exception) {
             Log.w(TAG, "webview check failed", e)
+            return false
         }
-        return false
+        // Window infos and node roots come from pools. Recycle every one on all
+        // paths so heavy tapping does not churn binder objects for days.
+        val roots = ArrayList<AccessibilityNodeInfo>()
+        try {
+            for (info in winInfos) {
+                try {
+                    info.root?.let { roots.add(it) }
+                } catch (_: Exception) {
+                }
+            }
+            try {
+                rootInActiveWindow?.let { roots.add(it) }
+            } catch (_: Exception) {
+            }
+            for (root in roots) {
+                if (subtreeHasWebView(root, x.toInt(), y.toInt())) return true
+            }
+            return false
+        } catch (e: Exception) {
+            Log.w(TAG, "webview check failed", e)
+            return false
+        } finally {
+            for (root in roots) {
+                try {
+                    root.recycle()
+                } catch (_: Exception) {
+                }
+            }
+            for (info in winInfos) {
+                try {
+                    info.recycle()
+                } catch (_: Exception) {
+                }
+            }
+        }
     }
 
     private fun subtreeHasWebView(root: AccessibilityNodeInfo, x: Int, y: Int): Boolean {
