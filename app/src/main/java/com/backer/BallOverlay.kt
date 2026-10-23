@@ -62,6 +62,7 @@ class BallOverlay(
     private val volumeRangePx = VOLUME_RANGE_DP * density
     private val driveCapPx = DRIVE_CAP_DP * density
     private val cursor = MouseCursor(service)
+    private val menu = ActionMenu(service)
 
     private val params = WindowManager.LayoutParams(
         ballSizePx,
@@ -119,6 +120,16 @@ class BallOverlay(
     }
     private val pendingTap = Runnable {
         tapPending = false
+        if (tapCount == 2) {
+            // Second tap settled with no third. Chained 200ms keeps single-tap delay flat.
+            tapCount = 0
+            if (mouseMode) {
+                exitMouseMode()
+            } else {
+                enterMouseMode()
+            }
+            return@Runnable
+        }
         tapCount = 0
         if (mouseMode) {
             clickThroughCursor()
@@ -168,6 +179,7 @@ class BallOverlay(
         handler.removeCallbacks(pendingTap)
         handler.removeCallbacks(volumeHold)
         view?.viewTreeObserver?.removeOnGlobalLayoutListener(layoutListener)
+        menu.hide()
         volumeDriving = false
         volumeArmed = false
         pressed.value = false
@@ -371,15 +383,19 @@ class BallOverlay(
             handler.removeCallbacks(volumeHold)
             volumeArmed = false
             tapCount += 1
-            if (tapCount >= 2) {
+            if (tapCount >= 3) {
                 handler.removeCallbacks(pendingTap)
                 tapPending = false
                 tapCount = 0
-                if (mouseMode) {
-                    exitMouseMode()
-                } else {
-                    enterMouseMode()
-                }
+                showActionMenu()
+                return
+            }
+            if (tapCount >= 2) {
+                // Wait a second window for a possible third tap. Mouse toggle
+                // and single-tap Back both fire from pendingTap.
+                tapPending = true
+                handler.removeCallbacks(pendingTap)
+                handler.postDelayed(pendingTap, TAP_SETTLE_MS)
                 return
             }
             tapPending = true
@@ -484,6 +500,7 @@ class BallOverlay(
     }
 
     private fun enterMouseMode() {
+        menu.hide()
         mouseMode = true
         cursor.showAt(cursor.x, cursor.y)
         cursorDragX = cursor.x
@@ -495,6 +512,28 @@ class BallOverlay(
         cancelCursorClicks()
         cursor.setDim(false)
         cursor.hide()
+    }
+
+    private fun showActionMenu() {
+        // Menu is normal-mode only. A triple tap in mouse mode exits it first.
+        if (mouseMode) {
+            exitMouseMode()
+        }
+        menu.showAt(params.x, params.y, ballSizePx, ::onMenuAction)
+    }
+
+    private fun onMenuAction(action: ActionMenu.MenuAction) {
+        when (action) {
+            ActionMenu.MenuAction.POWER -> {
+                service.performSystemAction(AccessibilityService.GLOBAL_ACTION_POWER_DIALOG)
+            }
+            ActionMenu.MenuAction.SCREENSHOT -> {
+                // Hide first so the menu does not appear in the shot.
+                handler.postDelayed({
+                    service.performSystemAction(AccessibilityService.GLOBAL_ACTION_TAKE_SCREENSHOT)
+                }, SCREENSHOT_DELAY_MS)
+            }
+        }
     }
 
     private fun updatePosition(x: Int, y: Int) {
@@ -601,6 +640,7 @@ class BallOverlay(
         private const val TAG = "Backer"
         private const val MOUSE_DRIVE_SLOP_DP = 8f
         private const val VOLUME_RANGE_DP = 200f
+        private const val SCREENSHOT_DELAY_MS = 300L
     }
 }
 
