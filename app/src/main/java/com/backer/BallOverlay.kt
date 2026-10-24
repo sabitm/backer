@@ -224,6 +224,12 @@ class BallOverlay(
             lastWidth = bounds.first
             lastHeight = bounds.second
             applyFractions(loadFractions(), bounds)
+            if (moving) {
+                // Rotation mid-move leaves dragOrigin on the old grid. Resync it
+                // so the next move delta extends from the rotated position.
+                dragOriginX = params.x
+                dragOriginY = params.y
+            }
         }
     }
 
@@ -248,6 +254,16 @@ class BallOverlay(
         // New touches must not expose the cursor while a click is preparing or running.
         if (mouseMode && activeClick == null) {
             cursor.setDim(false)
+        }
+        // Rotation may leave params on the old grid until the layout listener
+        // fires. Clamp now so the move origin starts inside the real screen.
+        val bounds = screenBounds()
+        if (bounds.first != lastWidth || bounds.second != lastHeight) {
+            lastWidth = bounds.first
+            lastHeight = bounds.second
+            applyFractions(loadFractions(), bounds)
+        } else {
+            updatePosition(params.x, params.y)
         }
         downRawX = event.rawX
         downRawY = event.rawY
@@ -488,7 +504,11 @@ class BallOverlay(
                 handler.removeCallbacks(pendingTap)
                 tapPending = false
                 tapCount = 0
-                showActionMenu()
+                if (mouseMode) {
+                    service.performSystemAction(AccessibilityService.GLOBAL_ACTION_BACK)
+                } else {
+                    showActionMenu()
+                }
                 return
             }
             if (tapCount >= 2) {
@@ -618,10 +638,7 @@ class BallOverlay(
     }
 
     private fun showActionMenu() {
-        // Menu is normal-mode only. A triple tap in mouse mode exits it first.
-        if (mouseMode) {
-            exitMouseMode()
-        }
+        // Normal-mode only. Cursor triple-tap sends Back instead of opening the menu.
         menu.showAt(params.x, params.y, ballSizePx, ::onMenuAction)
     }
 
